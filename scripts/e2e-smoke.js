@@ -8,10 +8,17 @@
 // The mock lives in the uncensored-ai-api repository. By default this script looks for it next
 // to this repository (../uncensored-ai-api/mock-server/server.mjs); set MOLOCHAI_MOCK_SERVER to
 // its path otherwise. Ports: E2E_MOCK_PORT (default 4015) and E2E_PORT (default 4016).
+//
+// To test a playground that is already running (CI uses this for the Docker image), set
+// E2E_PLAYGROUND_URL to its address; then nothing is started. That playground must forward to the
+// mock started with "--unavailable llama-3.3-70b-instruct-abliterated". If it requires an access
+// token, put it in E2E_ACCESS_TOKEN.
+//
 // Uses only Node built-ins, so it also runs on Node 20.
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -22,7 +29,11 @@ const mockPath = path.resolve(
 const mockPort = Number(process.env.E2E_MOCK_PORT ?? 4015)
 const port = Number(process.env.E2E_PORT ?? 4016)
 const mockUrl = `http://127.0.0.1:${mockPort}`
-const url = `http://127.0.0.1:${port}`
+const external = (process.env.E2E_PLAYGROUND_URL ?? '').trim().replace(/\/+$/, '')
+const url = external || `http://127.0.0.1:${port}`
+const accessToken = (process.env.E2E_ACCESS_TOKEN ?? '').trim()
+/** @type {Record<string, string>} */
+const auth = accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
 const UNAVAILABLE = 'llama-3.3-70b-instruct-abliterated'
 
 /** @type {import('node:child_process').ChildProcess[]} */
@@ -96,13 +107,46 @@ async function waitUntilUp(target, name) {
 }
 
 /**
+ * GET a playground API route the way the app does (with the access token when there is one).
+ * @param {string} pathname
+ * @param {Record<string, string>} [headers]
+ */
+function api(pathname, headers = {}) {
+  return fetch(`${url}${pathname}`, { headers: { ...auth, ...headers } })
+}
+
+/**
  * @param {unknown} body
  */
 function chat(body) {
   return fetch(`${url}/api/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...auth },
     body: JSON.stringify(body),
+  })
+}
+
+/**
+ * GET with an arbitrary Host header, which fetch() does not allow.
+ * @param {string} pathname
+ * @param {string} host
+ * @returns {Promise<{ status: number, body: string }>}
+ */
+function getWithHost(pathname, host) {
+  const target = new URL(url)
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      { host: target.hostname, port: target.port, path: pathname, headers: { Host: host } },
+      (res) => {
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => {
+          body += chunk
+        })
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+      },
+    )
+    req.on('error', reject)
   })
 }
 
@@ -129,23 +173,27 @@ const user = (/** @type {string} */ content) => [{ role: 'user', content }]
 const readJson = (res) => res.json()
 
 async function main() {
-  if (!existsSync(mockPath)) {
-    fail(`mock server not found at ${mockPath} (set MOLOCHAI_MOCK_SERVER)`)
-  }
-  if (!existsSync(path.join(root, 'dist', 'index.html'))) {
-    fail('dist/ is missing: run "npm run build" first')
-  }
+  if (external) {
+    console.log(`# testing the running playground at ${url}${accessToken ? ' (with access token)' : ''}`)
+  } else {
+    if (!existsSync(mockPath)) {
+      fail(`mock server not found at ${mockPath} (set MOLOCHAI_MOCK_SERVER)`)
+    }
+    if (!existsSync(path.join(root, 'dist', 'index.html'))) {
+      fail('dist/ is missing: run "npm run build" first')
+    }
 
-  start('mock', [mockPath, '--port', String(mockPort), '--quiet', '--unavailable', UNAVAILABLE])
-  await waitUntilUp(`${mockUrl}/health`, 'mock API')
-  start('playground', ['server/index.js', '--quiet'], {
-    HOST: '127.0.0.1',
-    PORT: String(port),
-    MOLOCHAI_BASE_URL: `${mockUrl}/api/v1`,
-    MOLOCHAI_API_KEY: 'mock-key',
-    PLAYGROUND_ACCESS_TOKEN: '',
-    PLAYGROUND_RATE_LIMIT: '60',
-  })
+    start('mock', [mockPath, '--port', String(mockPort), '--quiet', '--unavailable', UNAVAILABLE])
+    await waitUntilUp(`${mockUrl}/health`, 'mock API')
+    start('playground', ['server/index.js', '--quiet'], {
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      MOLOCHAI_BASE_URL: `${mockUrl}/api/v1`,
+      MOLOCHAI_API_KEY: 'mock-key',
+      PLAYGROUND_ACCESS_TOKEN: '',
+      PLAYGROUND_RATE_LIMIT: '60',
+    })
+  }
   await waitUntilUp(`${url}/healthz`, 'playground server')
 
   // The SPA and its security headers
@@ -162,7 +210,7 @@ async function main() {
   )
 
   // Models
-  const modelsRes = await fetch(`${url}/api/models`)
+  const modelsRes = await api('/api/models')
   const models = /** @type {{ data: Array<{ id: string, name: string, available: boolean }> }} */ (
     await modelsRes.json()
   )
@@ -175,7 +223,7 @@ async function main() {
   check(modelsRes.headers.get('x-ratelimit-remaining') !== null, 'X-RateLimit-Remaining is passed through')
 
   // Account (filtered)
-  const account = /** @type {Record<string, unknown>} */ (await (await fetch(`${url}/api/account`)).json())
+  const account = /** @type {Record<string, unknown>} */ (await (await api('/api/account')).json())
   check(account.plan === 'pro' && Array.isArray(account.models), 'GET /api/account returns plan and models')
   check(
     !('email' in account) && !('credit_usd' in account),
@@ -258,8 +306,25 @@ async function main() {
   )
 
   // Protections
-  const crossSite = await fetch(`${url}/api/models`, { headers: { Origin: 'https://attacker.example' } })
+  const crossSite = await api('/api/models', { Origin: 'https://attacker.example' })
   check(crossSite.status === 403, 'cross-origin API calls are refused')
+  if (accessToken) {
+    const anonymous = await fetch(`${url}/api/models`)
+    check(
+      anonymous.status === 401 && (await readJson(anonymous)).error.type === 'playground_auth_required',
+      'API calls without the access token are refused',
+    )
+    const wrong = await fetch(`${url}/api/models`, {
+      headers: { Authorization: 'Bearer wrong-token-0000000000' },
+    })
+    check(wrong.status === 401, 'API calls with a wrong access token are refused')
+  } else {
+    const rebound = await getWithHost('/api/models', 'playground.attacker.example')
+    check(
+      rebound.status === 403 && JSON.parse(rebound.body).error.type === 'playground_forbidden_host',
+      'without a token, requests for another host name are refused (DNS rebinding)',
+    )
+  }
 
   console.log(`\n${passed} checks passed`)
   stopping = true

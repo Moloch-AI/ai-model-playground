@@ -17,6 +17,9 @@ export const MIN_ACCESS_TOKEN_LENGTH = 16
  * @property {string} host            address to bind
  * @property {number} port            port to bind (0 picks a free one)
  * @property {string | null} accessToken  required from browsers when set
+ * @property {boolean} allowNoToken   the operator accepts a non-loopback `host` without a token
+ *                                    (a container whose port is published only on the host's
+ *                                    127.0.0.1); has no effect when a token is set
  * @property {number} rateLimit       /api requests per minute per client IP (0 turns it off)
  * @property {number} maxBodyBytes    largest accepted request body
  * @property {boolean} trustProxy     take the client IP from the last X-Forwarded-For entry
@@ -71,6 +74,14 @@ function integer(raw, name, fallback, min, max) {
 }
 
 /**
+ * A yes/no setting: 1, true or yes (any case) mean yes; anything else, including unset, means no.
+ * @param {string | undefined} raw
+ */
+function flag(raw) {
+  return /^(1|true|yes)$/i.test((raw ?? '').trim())
+}
+
+/**
  * Read and validate the configuration. Throws ConfigError with a message meant for the operator.
  * @param {Record<string, string | undefined>} env
  * @returns {PlaygroundConfig}
@@ -110,11 +121,16 @@ export function loadConfig(env) {
         "Generate one with: node -e \"console.log(require('node:crypto').randomBytes(24).toString('base64url'))\"",
     )
   }
-  if (!isLoopbackHost(host) && accessToken === null) {
+  // Inside a container the server has to bind 0.0.0.0, and it cannot see how the port is published
+  // on the host. So a non-loopback address still needs a token unless the operator states that the
+  // port is reachable only from the host itself (docker run -p 127.0.0.1:8787:8787 ...).
+  const allowNoToken = flag(env.PLAYGROUND_ALLOW_NO_TOKEN)
+  if (!isLoopbackHost(host) && accessToken === null && !allowNoToken) {
     throw new ConfigError(
       `Refusing to listen on ${host} without PLAYGROUND_ACCESS_TOKEN. Anyone who can reach this ` +
         'port could spend your API quota through the proxy. Set PLAYGROUND_ACCESS_TOKEN, or keep ' +
-        'HOST=127.0.0.1.',
+        "HOST=127.0.0.1. In a container whose port is published only on the host's 127.0.0.1 " +
+        '(docker run -p 127.0.0.1:8787:8787), you may set PLAYGROUND_ALLOW_NO_TOKEN=true instead.',
     )
   }
 
@@ -124,6 +140,7 @@ export function loadConfig(env) {
     host,
     port,
     accessToken,
+    allowNoToken,
     rateLimit: integer(env.PLAYGROUND_RATE_LIMIT, 'PLAYGROUND_RATE_LIMIT', DEFAULT_RATE_LIMIT, 0, 100_000),
     maxBodyBytes: integer(
       env.PLAYGROUND_MAX_BODY_BYTES,
@@ -132,8 +149,50 @@ export function loadConfig(env) {
       1024,
       64 * 1024 * 1024,
     ),
-    trustProxy: /^(1|true|yes)$/i.test((env.PLAYGROUND_TRUST_PROXY ?? '').trim()),
+    trustProxy: flag(env.PLAYGROUND_TRUST_PROXY),
   }
+}
+
+/**
+ * What the server prints once it listens: the address, the upstream origin and, when other
+ * machines may reach it, what that means.
+ * @param {PlaygroundConfig} config
+ * @param {{ port: number, dev: boolean }} listening  the port actually bound
+ * @returns {string[]}
+ */
+export function startupMessage(config, { port, dev }) {
+  const host = config.host.includes(':') ? `[${config.host}]` : config.host
+  const lines = [
+    `MolochAI playground listening on http://${host}:${port}${dev ? ' (development)' : ''}`,
+    `Forwarding to ${new URL(config.baseUrl).origin}`,
+  ]
+  if (config.accessToken !== null) lines.push('Access token required (PLAYGROUND_ACCESS_TOKEN).')
+  if (!isLoopbackHost(config.host)) {
+    lines.push(
+      config.accessToken === null
+        ? `No access token (PLAYGROUND_ALLOW_NO_TOKEN is set). Publish this port only on the host's ` +
+            `127.0.0.1 (docker run -p 127.0.0.1:${port}:${port}): anyone else who reaches it can ` +
+            'spend your API quota.'
+        : 'Reachable from other machines: put HTTPS in front of it (see docs/deployment.md).',
+    )
+  }
+  return lines
+}
+
+/**
+ * Where a health check on the same machine reaches the server: GET /healthz on the bound address,
+ * or on 127.0.0.1 when the server binds every address (0.0.0.0 or ::).
+ * @param {Pick<PlaygroundConfig, 'host' | 'port'>} config
+ */
+export function healthcheckUrl({ host, port }) {
+  if (port === 0) {
+    throw new ConfigError('PORT=0 picks a random port, so a health check cannot find the server.')
+  }
+  let h = host.trim()
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1)
+  const wildcard = h === '0.0.0.0' || (isIP(h) === 6 && /^[0:]+$/.test(h))
+  if (wildcard || h === '') h = '127.0.0.1'
+  return `http://${isIP(h) === 6 ? `[${h}]` : h}:${port}/healthz`
 }
 
 /**

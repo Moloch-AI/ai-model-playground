@@ -415,6 +415,24 @@ describe('browser-facing protections', () => {
     expect(upstream.requests).toHaveLength(3)
   })
 
+  it('keeps the loopback Host check when a container runs without a token (PLAYGROUND_ALLOW_NO_TOKEN)', async () => {
+    const { upstream, playground } = await setup(json(200, { data: [] }), {
+      host: '0.0.0.0',
+      allowNoToken: true,
+    })
+    for (const host of ['playground.example.com', '192.0.2.20:8787', 'host.docker.internal:8787']) {
+      const res = await rawRequest(playground.url, { path: '/api/models', headers: { Host: host } })
+      expect(res.status, host).toBe(403)
+      expect(JSON.parse(res.body).error.type).toBe('playground_forbidden_host')
+    }
+    const local = await rawRequest(playground.url, {
+      path: '/api/models',
+      headers: { Host: '127.0.0.1:8787' },
+    })
+    expect(local.status).toBe(200)
+    expect(upstream.requests).toHaveLength(1)
+  })
+
   it('rejects cross-origin API calls', async () => {
     const { upstream, playground } = await setup(json(200, { data: [] }))
     const host = new URL(playground.url).host

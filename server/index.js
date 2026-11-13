@@ -12,7 +12,7 @@
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createPlaygroundServer } from './app.js'
-import { ConfigError, isLoopbackHost, loadConfig } from './config.js'
+import { ConfigError, loadConfig, startupMessage } from './config.js'
 
 const args = new Set(process.argv.slice(2))
 for (const arg of args) {
@@ -71,16 +71,7 @@ server.on('error', (err) => {
 server.listen(config.port, config.host, () => {
   const address = server.address()
   const port = address && typeof address === 'object' ? address.port : config.port
-  const host = config.host.includes(':') ? `[${config.host}]` : config.host
-  const lines = [
-    `MolochAI playground listening on http://${host}:${port}${dev ? ' (development)' : ''}`,
-    `Forwarding to ${new URL(config.baseUrl).origin}`,
-  ]
-  if (config.accessToken !== null) lines.push('Access token required (PLAYGROUND_ACCESS_TOKEN).')
-  if (!isLoopbackHost(config.host)) {
-    lines.push('Reachable from other machines: put HTTPS in front of it (see README, Security).')
-  }
-  process.stdout.write(`${lines.join('\n')}\n`)
+  process.stdout.write(`${startupMessage(config, { port, dev }).join('\n')}\n`)
 })
 
 let closing = false

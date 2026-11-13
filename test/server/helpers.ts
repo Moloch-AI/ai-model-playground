@@ -62,6 +62,7 @@ export function makeConfig(overrides: Partial<PlaygroundConfig> = {}): Playgroun
     host: '127.0.0.1',
     port: 0,
     accessToken: null,
+    allowNoToken: false,
     rateLimit: 0,
     maxBodyBytes: 64 * 1024,
     trustProxy: false,

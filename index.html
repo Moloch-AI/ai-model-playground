@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="referrer" content="no-referrer" />
+    <title>MolochAI Playground</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Applies a saved light/dark choice before the first paint. External, so the CSP needs no
+         'unsafe-inline'. -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>The playground needs JavaScript.</noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

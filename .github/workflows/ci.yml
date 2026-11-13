@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx biome ci .
+      - run: npm run typecheck
+
+  test:
+    # Vitest 5 needs Node 22.12 or newer, so the unit tests run on 22 and 24.
+    # The server itself also runs on Node 20: see the e2e job.
+    name: Unit tests and build (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  e2e:
+    # Builds the SPA on Node 22, then runs the production server and the smoke test (both use
+    # only Node built-ins) on each supported runtime, against the mock API.
+    name: End-to-end against the mock (server on Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: Moloch-AI/uncensored-ai-api
+          ref: v0.1.0
+          path: .mock/uncensored-ai-api
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - run: npm run test:e2e
+        env:
+          MOLOCHAI_MOCK_SERVER: ${{ github.workspace }}/.mock/uncensored-ai-api/mock-server/server.mjs
+
+  browser:
+    name: Browser tests (Playwright, Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: Moloch-AI/uncensored-ai-api
+          ref: v0.1.0
+          path: .mock/uncensored-ai-api
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps --only-shell chromium
+      - run: npm run build
+      - run: npm run test:browser
+        env:
+          MOLOCHAI_MOCK_SERVER: ${{ github.workspace }}/.mock/uncensored-ai-api/mock-server/server.mjs

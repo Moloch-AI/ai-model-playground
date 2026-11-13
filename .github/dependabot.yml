@@ -7,6 +7,13 @@ updates:
     groups:
       development:
         dependency-type: development
+    ignore:
+      # vue-tsc cannot use TypeScript 7 yet (it has no JavaScript compiler API).
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # Types follow the oldest supported Node release (engines: >=20.19).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

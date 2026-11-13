@@ -91,6 +91,7 @@ appear only when the endpoint sends them. Only the MolochAI mock server is teste
 
 - Node.js 22.12 or newer to install, build and test (Vitest 5 needs it).
 - The built server runs on Node.js 20.19 or newer and has no runtime dependencies.
+- Or only Docker: the image builds and runs without Node on the host ([Run with Docker](#run-with-docker)).
 - A MolochAI API key from the [dashboard](https://dash.molochai.dev/account?utm_source=github&utm_medium=oss&utm_campaign=ai-model-playground),
   or the mock server for offline use.
 
@@ -118,6 +119,34 @@ npm start
 Open http://127.0.0.1:8787. For development with hot reload, run `npm run dev` instead: the same
 server runs Vite in middleware mode, so the app and `/api` share one port and there is no separate
 proxy to configure.
+
+## Run with Docker
+
+No image is published to a registry; build it from this repository (Node is not needed on the
+host):
+
+```bash
+git clone https://github.com/Moloch-AI/ai-model-playground.git
+cd ai-model-playground
+docker build -t ai-model-playground .
+export MOLOCHAI_API_KEY=your-api-key
+docker run --rm -p 127.0.0.1:8787:8787 -e MOLOCHAI_API_KEY -e PLAYGROUND_ALLOW_NO_TOKEN=true ai-model-playground
+```
+
+Open http://127.0.0.1:8787. `--env-file .env` works instead of `-e` (values without quotes, and
+leave `HOST` out).
+
+Inside the container the server listens on 0.0.0.0, so it refuses to start unless you either set
+an access token or say, with `PLAYGROUND_ALLOW_NO_TOKEN=true`, that nobody else can reach the
+port. That opt-out is only safe with `-p 127.0.0.1:8787:8787`, which publishes the port on your
+machine's loopback interface. **With `-p 8787:8787` anyone who can reach your machine can spend
+your quota**, and the key is not scoped. For a team, use `PLAYGROUND_ACCESS_TOKEN` and HTTPS.
+
+The image is two-stage: `npm ci` and `vite build` on a pinned `node:22` Alpine image, then a
+runtime with only the server, the built app and Node (no `node_modules`), running as a non-root
+user with a health check on `/healthz`. [docs/deployment.md](docs/deployment.md) covers env files,
+the access token, running behind a reverse proxy with `PLAYGROUND_TRUST_PROXY`, what the rate limit
+does and does not do, and why a public demo with a real key is not a good idea today.
 
 ## Usage examples
 
@@ -167,7 +196,8 @@ HOST=0.0.0.0 PLAYGROUND_ACCESS_TOKEN="$(node -e "console.log(require('node:crypt
 The browser asks for the token once per tab and keeps it in session storage. Put HTTPS in front
 of the server (a reverse proxy that terminates TLS), make the proxy pass the original `Host`
 header, and set `PLAYGROUND_TRUST_PROXY=true` so rate limiting sees client addresses. Read
-[Security considerations](#security-considerations) first.
+[Security considerations](#security-considerations) and [docs/deployment.md](docs/deployment.md)
+first.
 
 ### Run the checks
 
@@ -182,7 +212,9 @@ npm run test:browser
 ```
 
 `test:e2e` and `test:browser` expect the mock at `../uncensored-ai-api/mock-server/server.mjs`;
-set `MOLOCHAI_MOCK_SERVER` to its path otherwise.
+set `MOLOCHAI_MOCK_SERVER` to its path otherwise. To run the smoke test against a playground that
+is already running (CI does this for the Docker image), set `E2E_PLAYGROUND_URL`, and
+`E2E_ACCESS_TOKEN` if it has a token.
 
 ## Configuration
 
@@ -192,9 +224,10 @@ All settings are environment variables (or lines in `.env`).
 |---|---|---|
 | `MOLOCHAI_API_KEY` | (required) | API key, sent upstream as `Authorization: Bearer`. Never sent to the browser. `mock-key` for the mock server. |
 | `MOLOCHAI_BASE_URL` | `https://api.molochai.dev/api/v1` | API base URL. The account route is derived from it (`.../v1` becomes `.../auth/me`). |
-| `HOST` | `127.0.0.1` | Address to listen on. A non-loopback address requires `PLAYGROUND_ACCESS_TOKEN`. |
+| `HOST` | `127.0.0.1` (`0.0.0.0` in the Docker image) | Address to listen on. A non-loopback address requires `PLAYGROUND_ACCESS_TOKEN` (or, in a container, `PLAYGROUND_ALLOW_NO_TOKEN`). |
 | `PORT` | `8787` | Port to listen on. |
 | `PLAYGROUND_ACCESS_TOKEN` | (unset) | Shared secret browsers must send to use `/api`. At least 16 characters. When unset, the server only answers requests addressed to `localhost`, `127.0.0.1` or `[::1]`. |
+| `PLAYGROUND_ALLOW_NO_TOKEN` | `false` | `true` lets the server listen on a non-loopback `HOST` without a token. Only for a container whose port is published on the host's 127.0.0.1 (`docker run -p 127.0.0.1:8787:8787`); see [docs/deployment.md](docs/deployment.md). No effect when a token is set. |
 | `PLAYGROUND_RATE_LIMIT` | `60` | `/api` requests per minute per client address; `0` turns it off. |
 | `PLAYGROUND_MAX_BODY_BYTES` | `4194304` | Largest accepted chat request body (4 MiB). |
 | `PLAYGROUND_TRUST_PROXY` | `false` | Take the client address from the last `X-Forwarded-For` entry (only behind a proxy you control). |
@@ -230,7 +263,10 @@ prefix, so the app can tell them apart from API errors:
 | Symptom | Cause and fix |
 |---|---|
 | `MOLOCHAI_API_KEY is not set` at start | Copy `.env.example` to `.env` and set the key, or export it. |
-| `Refusing to listen on 0.0.0.0 without PLAYGROUND_ACCESS_TOKEN` | Intended. Set a token (see [Serve it to other machines](#serve-it-to-other-machines)) or keep `HOST=127.0.0.1`. |
+| `Refusing to listen on 0.0.0.0 without PLAYGROUND_ACCESS_TOKEN` | Intended. Set a token (see [Serve it to other machines](#serve-it-to-other-machines)) or keep `HOST=127.0.0.1`. In Docker, either set a token or publish with `-p 127.0.0.1:8787:8787` and add `-e PLAYGROUND_ALLOW_NO_TOKEN=true` ([Run with Docker](#run-with-docker)). |
+| Docker: the container runs but http://127.0.0.1:8787 does not answer | The env file sets `HOST=127.0.0.1`, which is the container's own loopback: remove that line. Also check that the port is published (`-p 127.0.0.1:8787:8787`). |
+| Docker: 502 "could not reach the API" with `MOLOCHAI_BASE_URL=http://127.0.0.1:...` | Inside the container 127.0.0.1 is the container itself. Run the mock in a container on the same Docker network ([docs/deployment.md](docs/deployment.md#try-it-against-the-mock-server)). |
+| Docker: 401 from the API with a key from `--env-file` | Docker keeps quotes as part of the value. Write `MOLOCHAI_API_KEY=...` without quotes. |
 | `The UI is not built yet` | Run `npm run build` before `npm start`, or use `npm run dev`. |
 | "Blocked by the playground server" (403) | Without a token the server only answers on `localhost`/`127.0.0.1`/`[::1]`. Open it through one of those names, or set a token. Behind a reverse proxy, also pass the original `Host` header so it matches the page's origin. |
 | "The API did not accept the key" (401) | `MOLOCHAI_API_KEY` is wrong or revoked. Fix it and restart the server. |
@@ -252,7 +288,9 @@ key itself.
 - **Open-relay risk.** Anyone who can reach `/api/chat` can send prompts on your account, use up
   your quota and read the replies. The defaults guard against that:
   - it binds to `127.0.0.1` and refuses to start on any other address without
-    `PLAYGROUND_ACCESS_TOKEN`;
+    `PLAYGROUND_ACCESS_TOKEN`. The Docker image binds `0.0.0.0` and keeps that rule; only an
+    explicit `PLAYGROUND_ALLOW_NO_TOKEN=true` lifts it, for a port published on the host's
+    127.0.0.1 (the server cannot check that, so it is on you);
   - without a token it only answers requests addressed to a loopback name, which blocks DNS
     rebinding and a reverse proxy that exposes it by accident;
   - `/api` rejects cross-site requests (`Origin` and `Sec-Fetch-Site` checks), so other websites
@@ -278,6 +316,9 @@ key itself.
 - **Your responsibility.** If you let other people use the playground, the Acceptable Use Policy
   still applies to everything sent with your key, and you need your own rules and moderation for
   those users.
+- **No public demo with a real key.** A publicly reachable instance is a public tap on your
+  account; see [docs/deployment.md](docs/deployment.md#public-demo-eg-hugging-face-spaces) for why
+  and what would have to change first.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 

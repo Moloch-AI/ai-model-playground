@@ -18,3 +18,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # The image stays on Node 22 (the version CI builds with); a new major is a deliberate change.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]

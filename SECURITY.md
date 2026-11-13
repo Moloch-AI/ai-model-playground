@@ -25,7 +25,8 @@ and create a new one.
 ## Scope notes
 
 The playground is a proxy that holds an API key. The README's
-[Security considerations](README.md#security-considerations) section describes the defaults and
-the risk of exposing it to a network; reports about configurations that section already warns
-against (for example running with an access token over plain HTTP on a public network) are
-still welcome, but may be answered with documentation changes.
+[Security considerations](README.md#security-considerations) section and
+[docs/deployment.md](docs/deployment.md) describe the defaults and the risk of exposing it to a
+network; reports about configurations they already warn against (for example running with an
+access token over plain HTTP on a public network, or `PLAYGROUND_ALLOW_NO_TOKEN` with a port
+published on every interface) are still welcome, but may be answered with documentation changes.

@@ -75,6 +75,140 @@ jobs:
         env:
           MOLOCHAI_MOCK_SERVER: ${{ github.workspace }}/.mock/uncensored-ai-api/mock-server/server.mjs
 
+  docker:
+    # Builds the image from the Dockerfile (nothing is pushed anywhere) and runs the e2e smoke
+    # test against containers started the ways docs/deployment.md describes. The mock API runs in
+    # its own container on a private Docker network.
+    name: Docker image (build, then e2e against the mock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      IMAGE: ai-model-playground
+      MOLOCHAI_API_KEY: mock-key
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: Moloch-AI/uncensored-ai-api
+          ref: v0.1.0
+          path: .mock/uncensored-ai-api
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check the image (non-root, runtime files only)
+        run: |
+          docker image ls "$IMAGE"
+          test "$(docker image inspect --format '{{.Config.User}}' "$IMAGE")" = "1000:1000"
+          test "$(docker run --rm --entrypoint id "$IMAGE" -u)" = "1000"
+          # Only the server, the built SPA and package.json: no node_modules, no sources, no .env.
+          test "$(docker run --rm --entrypoint ls "$IMAGE" -A /app | tr '\n' ' ')" = "dist package.json server "
+          if docker run --rm --entrypoint sh "$IMAGE" -c 'command -v npm'; then
+            echo "npm should not be in the runtime image"; exit 1
+          fi
+
+      - name: Refuses to listen on 0.0.0.0 without a token or the opt-out
+        run: |
+          status=0
+          output="$(docker run --rm -e MOLOCHAI_API_KEY "$IMAGE" 2>&1)" || status=$?
+          echo "$output"
+          test "$status" -eq 1
+          grep -q 'Refusing to listen on 0.0.0.0 without PLAYGROUND_ACCESS_TOKEN' <<<"$output"
+
+      - name: Start the mock API
+        run: |
+          docker network create playground-net
+          # The mock needs only Node, which the playground image already has.
+          docker run -d --name mock --network playground-net --no-healthcheck \
+            -v "$GITHUB_WORKSPACE/.mock/uncensored-ai-api/mock-server:/mock:ro" \
+            --entrypoint node "$IMAGE" \
+            /mock/server.mjs --host 0.0.0.0 --port 4010 --quiet \
+            --unavailable llama-3.3-70b-instruct-abliterated
+          timeout 30 bash -c 'until docker logs mock 2>&1 | grep -q "listening on"; do sleep 1; done'
+
+      - name: Start the playground three ways
+        run: |
+          # 1. Local only, no token (the README command), on the host's 127.0.0.1.
+          docker run -d --name local --network playground-net --health-interval 2s \
+            -p 127.0.0.1:8787:8787 -e MOLOCHAI_API_KEY -e PLAYGROUND_ALLOW_NO_TOKEN=true \
+            -e MOLOCHAI_BASE_URL=http://mock:4010/api/v1 \
+            "$IMAGE"
+
+          # 2. The same from an env file made from .env.example.
+          sed -e 's|^MOLOCHAI_API_KEY=.*|MOLOCHAI_API_KEY=mock-key|' \
+              -e 's|^MOLOCHAI_BASE_URL=.*|MOLOCHAI_BASE_URL=http://mock:4010/api/v1|' \
+              -e 's|^# PLAYGROUND_ALLOW_NO_TOKEN=true$|PLAYGROUND_ALLOW_NO_TOKEN=true|' \
+              .env.example > "$RUNNER_TEMP/playground.env"
+          grep -qx 'PLAYGROUND_ALLOW_NO_TOKEN=true' "$RUNNER_TEMP/playground.env"
+          docker run -d --name envfile --network playground-net --health-interval 2s \
+            -p 127.0.0.1:8788:8787 --env-file "$RUNNER_TEMP/playground.env" \
+            "$IMAGE"
+
+          # 3. With an access token, as behind a reverse proxy, with the hardening flags.
+          PLAYGROUND_ACCESS_TOKEN="$(docker run --rm --entrypoint node "$IMAGE" -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))")"
+          echo "::add-mask::$PLAYGROUND_ACCESS_TOKEN"
+          echo "PLAYGROUND_ACCESS_TOKEN=$PLAYGROUND_ACCESS_TOKEN" >> "$GITHUB_ENV"
+          export PLAYGROUND_ACCESS_TOKEN
+          docker run -d --name token --network playground-net --health-interval 2s \
+            --restart unless-stopped --read-only --cap-drop ALL --security-opt no-new-privileges \
+            -p 127.0.0.1:8789:8787 \
+            -e MOLOCHAI_API_KEY -e PLAYGROUND_ACCESS_TOKEN -e PLAYGROUND_TRUST_PROXY=true \
+            -e MOLOCHAI_BASE_URL=http://mock:4010/api/v1 \
+            "$IMAGE"
+
+          # The image's HEALTHCHECK has to report all three as healthy.
+          wait_healthy() {
+            for _ in $(seq 60); do
+              [ "$(docker inspect --format '{{.State.Health.Status}}' "$1")" = healthy ] && return 0
+              sleep 1
+            done
+            docker logs "$1"
+            return 1
+          }
+          for name in local envfile token; do
+            wait_healthy "$name"
+            echo "$name: healthy"
+          done
+          docker logs local 2>&1 | grep -q 'No access token (PLAYGROUND_ALLOW_NO_TOKEN is set)'
+
+      - name: Smoke test, local only without a token
+        run: npm run test:e2e
+        env:
+          E2E_PLAYGROUND_URL: http://127.0.0.1:8787
+      - name: Smoke test, env file
+        run: npm run test:e2e
+        env:
+          E2E_PLAYGROUND_URL: http://127.0.0.1:8788
+      - name: Smoke test, access token
+        run: E2E_ACCESS_TOKEN="$PLAYGROUND_ACCESS_TOKEN" npm run test:e2e
+        env:
+          E2E_PLAYGROUND_URL: http://127.0.0.1:8789
+
+      - name: Stops cleanly on SIGTERM (docker stop)
+        run: |
+          docker stop token
+          test "$(docker inspect --format '{{.State.ExitCode}}' token)" = 0
+
+      - name: Container logs
+        if: always()
+        run: |
+          for name in mock local envfile token; do
+            echo "::group::$name"
+            docker logs "$name" 2>&1 || true
+            echo "::endgroup::"
+          done
+
   browser:
     name: Browser tests (Playwright, Chromium)
     runs-on: ubuntu-latest

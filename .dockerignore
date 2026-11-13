@@ -1,0 +1,26 @@
+# The build context is an allowlist: only what the Dockerfile reads is sent to the builder.
+# If the build needs a new top-level file, add it here.
+*
+!package.json
+!package-lock.json
+!index.html
+!vite.config.ts
+!tsconfig*.json
+!public/
+!src/
+!server/
+
+# Never sent, even from inside an allowed folder: secrets, installed or built output, test
+# output, the mock checkout and version control.
+**/.env
+**/.env.*
+**/*.pem
+**/.npmrc
+**/node_modules
+**/dist
+**/coverage
+**/test-results
+**/playwright-report
+**/.mock
+**/.git
+**/*.log

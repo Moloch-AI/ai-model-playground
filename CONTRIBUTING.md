@@ -42,16 +42,28 @@ npm run test:browser  # Playwright in headless Chromium, needs dist/ and the moc
 
 CI matrix: lint and typecheck on Node 22; unit tests and build on Node 22 and 24; the end-to-end
 smoke test runs the built server on Node 20, 22 and 24 (the SPA is built on 22 first); browser
-tests on Node 22. Unit tests do not run on Node 20 because Vitest 5 does not support it. The e2e
-and browser jobs check out `Moloch-AI/uncensored-ai-api` at `v0.1.0` for the mock server.
+tests on Node 22. Unit tests do not run on Node 20 because Vitest 5 does not support it. The e2e,
+browser and Docker jobs check out `Moloch-AI/uncensored-ai-api` at `v0.1.0` for the mock server.
+
+The Docker job builds the image (nothing is pushed), checks that it runs as uid 1000 and holds only
+`dist`, `package.json` and `server` in `/app`, checks that it refuses to start on 0.0.0.0 without a
+token or `PLAYGROUND_ALLOW_NO_TOKEN`, then starts the mock and three playground containers (no
+token on a loopback-only port, the same from an env file made from `.env.example`, and with a
+token plus `--read-only --cap-drop ALL`), waits for the image's health check, and runs
+`npm run test:e2e` against each with `E2E_PLAYGROUND_URL` (and `E2E_ACCESS_TOKEN`). If you change
+the `Dockerfile`, `.dockerignore` or `server/`, build the image and follow
+[docs/deployment.md](docs/deployment.md#try-it-against-the-mock-server) locally if you have Docker;
+otherwise CI covers it. `.dockerignore` is an allowlist: a new file the build reads must be added
+there.
 
 ## Layout
 
 ```
 server/            Node server, plain ESM JavaScript with JSDoc types, no runtime dependencies
   index.js         command-line entry (reads .env, --dev, --quiet)
+  healthcheck.js   GET /healthz on this machine, exit 0 or 1 (the Docker HEALTHCHECK)
   app.js           routing, proxying, access token, origin and host checks
-  config.js        environment parsing and validation
+  config.js        environment parsing and validation, startup message
   rate-limit.js    per-IP sliding window
   security.js      CSP and other response headers
   static.js        serves dist/
@@ -65,6 +77,9 @@ test/client/       Vitest: lib modules, theme contrast, App component (happy-dom
 test/server/       Vitest: config, rate limiter, proxy behavior against an in-process fake API
 scripts/           e2e-smoke.js (Node built-ins only)
 e2e/               Playwright browser tests
+docs/              deployment.md (Docker, access token, reverse proxy, rate limit)
+Dockerfile         two-stage image: build the SPA, then a runtime without node_modules
+.dockerignore      allowlist of the files the image build reads
 ```
 
 ## Guidelines
